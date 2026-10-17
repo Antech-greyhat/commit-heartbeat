@@ -1,0 +1,35 @@
+# Example caller. Copy this to .github/workflows/streak.yml in YOUR repo
+# and replace OWNER with the account that hosts commit-heartbeat.
+name: Streak guard
+
+on:
+  # Times are UTC. Pick times that suit your timezone; avoid minute 0.
+  schedule:
+    - cron: "17 7 * * *"
+    - cron: "17 10 * * *"
+    - cron: "23 18 * * *"
+    - cron: "23 20 * * *"
+    - cron: "37 22 * * *"   # late backup, still before 00:00 UTC
+  # Adds the "Run workflow" button.
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Make a test commit even if already active today"
+        type: boolean
+        default: false
+
+# Let the bot push commits.
+permissions:
+  contents: write
+
+jobs:
+  heartbeat:
+    # Pin to a version tag, not @main.
+    uses: OWNER/commit-heartbeat/.github/workflows/heartbeat.yml@v1
+    permissions:
+      contents: write
+    with:
+      force: ${{ inputs.force == true }}
+      target: 15
+    # Passes GIT_USER_NAME, GIT_USER_EMAIL, GH_USERNAME, CONTRIB_TOKEN.
+    secrets: inherit

@@ -1,0 +1,5 @@
+# Copy to .heartbeat/messages.txt in your repo. One message per line.
+chore: update heartbeat log
+docs: refresh daily notes
+chore: routine sync
+chore: log timestamp

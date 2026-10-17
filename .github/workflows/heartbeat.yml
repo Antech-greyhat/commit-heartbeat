@@ -1,0 +1,183 @@
+# Reusable "streak guard" workflow.
+# It has NO schedule of its own. Another repo calls it with:
+#   uses: OWNER/commit-heartbeat/.github/workflows/heartbeat.yml@v1
+# No personal details live here: name, email and username come from the caller's secrets.
+name: Commit heartbeat (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      force:
+        description: "Make 1 test commit even if no commit is needed"
+        type: boolean
+        default: false
+      target:
+        description: "Contributions you want per UTC day"
+        type: number
+        default: 15
+      keepalive_days:
+        description: "Commit anyway if the repo has had no commit for this many days"
+        type: number
+        default: 50
+      messages_file:
+        description: "File in the caller repo with one commit message per line"
+        type: string
+        default: ".heartbeat/messages.txt"
+    secrets:
+      GIT_USER_NAME:
+        required: true
+      GIT_USER_EMAIL:
+        required: true
+      GH_USERNAME:
+        required: true
+      CONTRIB_TOKEN:
+        # Optional personal access token for reading contribution counts.
+        required: false
+
+jobs:
+  heartbeat:
+    runs-on: ubuntu-latest
+    # Needed so the job can push commits back to the caller repo.
+    permissions:
+      contents: write
+    # Never let two runs commit at the same time.
+    concurrency:
+      group: heartbeat-${{ github.repository }}
+      cancel-in-progress: false
+
+    steps:
+      # 1. Get the caller repo with full history (we read git log later).
+      - name: Check out repo
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      # 2. Switch to the default branch, so commits always land where they count.
+      - name: Switch to default branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          DEFAULT_BRANCH=$(gh api "repos/${GITHUB_REPOSITORY}" --jq .default_branch)
+          echo "Default branch: $DEFAULT_BRANCH"
+          git checkout "$DEFAULT_BRANCH"
+          echo "DEFAULT_BRANCH=$DEFAULT_BRANCH" >> "$GITHUB_ENV"
+
+      # 3. Today's date in UTC (GitHub counts contribution days in UTC).
+      - name: Get today's UTC date
+        run: |
+          TODAY=$(date -u +%Y-%m-%d)
+          echo "Today (UTC): $TODAY"
+          echo "TODAY=$TODAY" >> "$GITHUB_ENV"
+
+      # 4. Count how many commits THIS BOT already made today (from git log).
+      #    Bot commits carry the trailer "Heartbeat-Bot: true".
+      - name: Count bot commits today
+        run: |
+          BOT_TODAY=$(git log --since="${TODAY}T00:00:00Z" --grep='^Heartbeat-Bot: true' --format=%H | wc -l)
+          echo "Bot commits today: $BOT_TODAY"
+          echo "BOT_TODAY=$BOT_TODAY" >> "$GITHUB_ENV"
+
+      # 5. Ask the GitHub GraphQL API for today's contribution count.
+      #    If anything fails, API_OK=false and we fall back to committing (fail-safe).
+      - name: Check contributions today
+        env:
+          GH_TOKEN: ${{ secrets.CONTRIB_TOKEN || github.token }}
+          GH_USERNAME: ${{ secrets.GH_USERNAME }}
+        run: |
+          set +e
+          RESULT=$(gh api graphql \
+            -f query='query($login: String!, $from: DateTime!, $to: DateTime!) {
+              user(login: $login) {
+                contributionsCollection(from: $from, to: $to) {
+                  contributionCalendar { weeks { contributionDays { date contributionCount } } }
+                }
+              }
+            }' \
+            -f login="$GH_USERNAME" \
+            -f from="${TODAY}T00:00:00Z" \
+            -f to="${TODAY}T23:59:59Z" \
+            --jq "[.data.user.contributionsCollection.contributionCalendar.weeks[].contributionDays[] | select(.date == \"$TODAY\") | .contributionCount] | first" 2>&1)
+          STATUS=$?
+          set -e
+          if [ $STATUS -eq 0 ] && [[ "$RESULT" =~ ^[0-9]+$ ]]; then
+            echo "Contributions today: $RESULT"
+            echo "CONTRIBUTIONS=$RESULT" >> "$GITHUB_ENV"
+            echo "API_OK=true" >> "$GITHUB_ENV"
+          else
+            echo "::warning::Contribution API check failed (fail-safe will commit). Output: $RESULT"
+            echo "API_OK=false" >> "$GITHUB_ENV"
+          fi
+
+      # 6. Decide how many commits to make.
+      - name: Decide what to do
+        env:
+          FORCE: ${{ inputs.force }}
+          TARGET: ${{ inputs.target }}
+          KEEPALIVE_DAYS: ${{ inputs.keepalive_days }}
+        run: |
+          # Days since the last commit of any kind (for the 60-day auto-disable rule).
+          LAST_TS=$(git log -1 --format=%ct)
+          DAYS_IDLE=$(( ( $(date -u +%s) - LAST_TS ) / 86400 ))
+          echo "Days since last commit in this repo: $DAYS_IDLE"
+
+          # The bot never makes more than TARGET commits of its own per day.
+          BOT_ROOM=$(( TARGET - BOT_TODAY ))
+          if [ $BOT_ROOM -lt 0 ]; then BOT_ROOM=0; fi
+
+          if [ "$API_OK" = "true" ]; then
+            NEEDED=$(( TARGET - CONTRIBUTIONS ))
+            # The graph can lag behind, so also respect what the bot already did.
+            if [ $NEEDED -gt $BOT_ROOM ]; then NEEDED=$BOT_ROOM; fi
+          else
+            # Fail-safe: the API is down, top up the bot's own commits to TARGET.
+            NEEDED=$BOT_ROOM
+          fi
+          if [ $NEEDED -lt 0 ]; then NEEDED=0; fi
+
+          if [ "$FORCE" = "true" ] && [ $NEEDED -lt 1 ]; then
+            echo "Force is on: making 1 test commit."
+            NEEDED=1
+          elif [ $DAYS_IDLE -ge $KEEPALIVE_DAYS ] && [ $NEEDED -lt 1 ]; then
+            echo "Keepalive: no commit for $DAYS_IDLE days, making 1 commit."
+            NEEDED=1
+          elif [ $BOT_TODAY -ge $TARGET ]; then
+            echo "Bot already made $BOT_TODAY commits today, skipping."
+          elif [ $NEEDED -eq 0 ]; then
+            echo "Contributions today: $CONTRIBUTIONS, target is $TARGET, skipping."
+          else
+            echo "Will make $NEEDED commit(s) to reach $TARGET."
+          fi
+          echo "NEEDED=$NEEDED" >> "$GITHUB_ENV"
+
+      # 7. Make the commits. Each one appends a UTC timestamp to updates.txt
+      #    and picks a random message from the messages file.
+      - name: Make commits
+        if: env.NEEDED != '0'
+        env:
+          GIT_USER_NAME: ${{ secrets.GIT_USER_NAME }}
+          GIT_USER_EMAIL: ${{ secrets.GIT_USER_EMAIL }}
+          MESSAGES_FILE: ${{ inputs.messages_file }}
+        run: |
+          git config user.name "$GIT_USER_NAME"
+          git config user.email "$GIT_USER_EMAIL"
+          for i in $(seq 1 "$NEEDED"); do
+            if [ -s "$MESSAGES_FILE" ]; then
+              MSG=$( (grep -v -e '^\s*$' -e '^#' "$MESSAGES_FILE" || true) | shuf -n 1)
+            fi
+            MSG=${MSG:-"chore: heartbeat update"}
+            echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) run ${GITHUB_RUN_ID} #$i" >> updates.txt
+            git add updates.txt
+            git commit -q -m "$MSG" -m "Heartbeat-Bot: true"
+            echo "Committed $i/$NEEDED: $MSG"
+          done
+
+      # 8. Push only if we actually committed something.
+      - name: Push
+        if: env.NEEDED != '0'
+        run: |
+          git push origin "HEAD:${DEFAULT_BRANCH}"
+          echo "Pushed $NEEDED commit(s) to $DEFAULT_BRANCH."
+
+      # 9. Final summary line for the logs.
+      - name: Summary
+        run: echo "Done. API ok=$API_OK, contributions=${CONTRIBUTIONS:-unknown}, bot today=$BOT_TODAY, new commits=$NEEDED"
