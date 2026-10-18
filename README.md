@@ -2,7 +2,7 @@
 
 A small **reusable GitHub Actions workflow** that keeps a contribution streak alive. Built as a learning project.
 
-## What it does (honestly)
+## What it does
 
 Each time it runs, it:
 
