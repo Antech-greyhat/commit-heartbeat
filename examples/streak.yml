@@ -25,11 +25,14 @@ permissions:
 jobs:
   heartbeat:
     # Pin to a version tag, not @main.
-    uses: OWNER/commit-heartbeat/.github/workflows/heartbeat.yml@v1
+    uses: OWNER/commit-heartbeat/.github/workflows/heartbeat.yml@v2
     permissions:
       contents: write
     with:
       force: ${{ inputs.force == true }}
-      target: 15
+      target: 20
+      per_run: 3
+      # Must match the last cron line above: that run tops up to target.
+      final_run: ${{ github.event.schedule == '37 22 * * *' }}
     # Passes GIT_USER_NAME, GIT_USER_EMAIL, GH_USERNAME, CONTRIB_TOKEN.
     secrets: inherit

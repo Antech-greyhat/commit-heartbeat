@@ -7,9 +7,9 @@ A small **reusable GitHub Actions workflow** that keeps a contribution streak al
 Each time it runs, it:
 
 1. Gets today's date in **UTC** (GitHub counts contribution days in UTC).
-2. Counts how many commits the bot already made today. If it already made the target (default **15**), it stops.
+2. Counts how many commits the bot already made today. If it already made the target (default **20**), it stops.
 3. Asks the GitHub API how many contributions you have today.
-4. If you have fewer than the target, it makes enough commits to reach it. Each commit adds a UTC timestamp to `updates.txt` with a random message from `.heartbeat/messages.txt`.
+4. If you have fewer than the target, it makes up to `per_run` commits (default **3**). The last backup run of the day (`final_run: true`) makes as many as needed to reach the target. Each commit adds a UTC timestamp to `updates.txt` with a random message from `.heartbeat/messages.txt`.
 5. If the API check fails, it commits anyway (fail-safe).
 6. If the repo has had no commit for 50 days, it makes one commit so GitHub doesn't disable the schedule.
 
@@ -20,7 +20,7 @@ Each time it runs, it:
 1. Click **Use this template → Create a new repository** (public). Don't fork: commits in forks do not count toward your contribution graph.
 2. In the new repo, move `examples/streak.yml` to `.github/workflows/streak.yml` and replace `OWNER` with the account that hosts this tool.
 3. Copy `examples/messages.txt` to `.heartbeat/messages.txt` and edit the messages.
-4. Delete the copied `.github/workflows/heartbeat.yml` from your new repo if you call the upstream `@v1` version (optional).
+4. Delete the copied `.github/workflows/heartbeat.yml` from your new repo if you call the upstream `@v2` version (optional).
 5. Add repository secrets (**Settings → Secrets and variables → Actions**):
    - `GIT_USER_NAME`: your name
    - `GIT_USER_EMAIL`: your GitHub no-reply email (`ID+username@users.noreply.github.com`)
@@ -34,7 +34,9 @@ Each time it runs, it:
 | Input | Default | Meaning |
 |---|---|---|
 | `force` | `false` | Make 1 commit even if nothing is needed |
-| `target` | `15` | Contributions per UTC day |
+| `target` | `20` | Contributions per UTC day |
+| `per_run` | `3` | Max commits per normal run |
+| `final_run` | `false` | Last backup run: top up to `target` |
 | `keepalive_days` | `50` | Commit if the repo was idle this long |
 | `messages_file` | `.heartbeat/messages.txt` | Commit message list |
 

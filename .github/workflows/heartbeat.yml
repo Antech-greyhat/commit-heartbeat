@@ -14,7 +14,15 @@ on:
       target:
         description: "Contributions you want per UTC day"
         type: number
-        default: 15
+        default: 20
+      per_run:
+        description: "Max commits per normal run (the final run tops up to target)"
+        type: number
+        default: 3
+      final_run:
+        description: "This is the last backup run of the day: commit whatever is left to reach target"
+        type: boolean
+        default: false
       keepalive_days:
         description: "Commit anyway if the repo has had no commit for this many days"
         type: number
@@ -113,6 +121,8 @@ jobs:
         env:
           FORCE: ${{ inputs.force }}
           TARGET: ${{ inputs.target }}
+          PER_RUN: ${{ inputs.per_run }}
+          FINAL_RUN: ${{ inputs.final_run }}
           KEEPALIVE_DAYS: ${{ inputs.keepalive_days }}
         run: |
           # Days since the last commit of any kind (for the 60-day auto-disable rule).
@@ -134,6 +144,13 @@ jobs:
           fi
           if [ $NEEDED -lt 0 ]; then NEEDED=0; fi
 
+          # Normal runs make at most PER_RUN commits; the final run tops up to TARGET.
+          if [ "$FINAL_RUN" = "true" ]; then
+            echo "Final backup run: topping up to $TARGET."
+          elif [ $NEEDED -gt $PER_RUN ]; then
+            NEEDED=$PER_RUN
+          fi
+
           if [ "$FORCE" = "true" ] && [ $NEEDED -lt 1 ]; then
             echo "Force is on: making 1 test commit."
             NEEDED=1
@@ -145,7 +162,7 @@ jobs:
           elif [ $NEEDED -eq 0 ]; then
             echo "Contributions today: $CONTRIBUTIONS, target is $TARGET, skipping."
           else
-            echo "Will make $NEEDED commit(s) to reach $TARGET."
+            echo "Will make $NEEDED commit(s) this run (target $TARGET)."
           fi
           echo "NEEDED=$NEEDED" >> "$GITHUB_ENV"
 
