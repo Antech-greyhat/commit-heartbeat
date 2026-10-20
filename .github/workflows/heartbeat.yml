@@ -12,7 +12,7 @@ on:
         type: boolean
         default: false
       target:
-        description: "Contributions you want per UTC day"
+        description: "Commits the bot makes of its own per UTC day (your commits are extra)"
         type: number
         default: 20
       per_run:
@@ -85,9 +85,10 @@ jobs:
           echo "Bot commits today: $BOT_TODAY"
           echo "BOT_TODAY=$BOT_TODAY" >> "$GITHUB_ENV"
 
-      # 5. Ask the GitHub GraphQL API for today's contribution count.
-      #    If anything fails, API_OK=false and we fall back to committing (fail-safe).
-      - name: Check contributions today
+      # 5. Streak check: ask the GitHub GraphQL API for today's contribution count.
+      #    This only tells us whether today's streak is already active; it does NOT
+      #    reduce the bot's own commits. If it fails, API_OK=false and the bot commits anyway.
+      - name: Check streak today
         env:
           GH_TOKEN: ${{ secrets.CONTRIB_TOKEN || github.token }}
           GH_USERNAME: ${{ secrets.GH_USERNAME }}
@@ -130,18 +131,18 @@ jobs:
           DAYS_IDLE=$(( ( $(date -u +%s) - LAST_TS ) / 86400 ))
           echo "Days since last commit in this repo: $DAYS_IDLE"
 
-          # The bot never makes more than TARGET commits of its own per day.
-          BOT_ROOM=$(( TARGET - BOT_TODAY ))
-          if [ $BOT_ROOM -lt 0 ]; then BOT_ROOM=0; fi
-
-          if [ "$API_OK" = "true" ]; then
-            NEEDED=$(( TARGET - CONTRIBUTIONS ))
-            # The graph can lag behind, so also respect what the bot already did.
-            if [ $NEEDED -gt $BOT_ROOM ]; then NEEDED=$BOT_ROOM; fi
+          # Streak check. Either way the bot goes on to make its own commits;
+          # your own commits never count toward the bot's TARGET.
+          if [ "$API_OK" != "true" ]; then
+            echo "Streak unknown (API check failed), making the bot's commits anyway."
+          elif [ "$CONTRIBUTIONS" -eq 0 ]; then
+            echo "Streak not active yet today: this run's commits will start it."
           else
-            # Fail-safe: the API is down, top up the bot's own commits to TARGET.
-            NEEDED=$BOT_ROOM
+            echo "Streak already active today ($CONTRIBUTIONS contributions), making the bot's own commits on top."
           fi
+
+          # The bot makes TARGET commits of its own per day, apart from yours.
+          NEEDED=$(( TARGET - BOT_TODAY ))
           if [ $NEEDED -lt 0 ]; then NEEDED=0; fi
 
           # Normal runs make at most PER_RUN commits; the final run tops up to TARGET.
@@ -159,10 +160,8 @@ jobs:
             NEEDED=1
           elif [ $BOT_TODAY -ge $TARGET ]; then
             echo "Bot already made $BOT_TODAY commits today, skipping."
-          elif [ $NEEDED -eq 0 ]; then
-            echo "Contributions today: $CONTRIBUTIONS, target is $TARGET, skipping."
           else
-            echo "Will make $NEEDED commit(s) this run (target $TARGET)."
+            echo "Will make $NEEDED bot commit(s) this run (bot has $BOT_TODAY/$TARGET today)."
           fi
           echo "NEEDED=$NEEDED" >> "$GITHUB_ENV"
 

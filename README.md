@@ -8,9 +8,9 @@ Each time it runs, it:
 
 1. Gets today's date in **UTC** (GitHub counts contribution days in UTC).
 2. Counts how many commits the bot already made today. If it already made the target (default **20**), it stops.
-3. Asks the GitHub API how many contributions you have today.
-4. If you have fewer than the target, it makes up to `per_run` commits (default **3**). The last backup run of the day (`final_run: true`) makes as many as needed to reach the target. Each commit adds a UTC timestamp to `updates.txt` with a random message from `.heartbeat/messages.txt`.
-5. If the API check fails, it commits anyway (fail-safe).
+3. Checks your streak: asks the GitHub API whether you have any contributions today. If not, this run's commits start the streak; if you do, the bot still makes its own commits. Your own commits never reduce the bot's count.
+4. Makes up to `per_run` bot commits (default **3**). The last backup run of the day (`final_run: true`) makes as many as needed so the bot itself reaches the target. Each commit adds a UTC timestamp to `updates.txt` with a random message from `.heartbeat/messages.txt`.
+5. If the API check fails, it commits anyway.
 6. If the repo has had no commit for 50 days, it makes one commit so GitHub doesn't disable the schedule.
 
 **Be clear about what this means:** these are automated commits, not real work. They make your contribution graph look more active than it is. Anyone who opens the repo can see that. Don't use it to mislead employers, schools or anyone else.
@@ -34,7 +34,7 @@ Each time it runs, it:
 | Input | Default | Meaning |
 |---|---|---|
 | `force` | `false` | Make 1 commit even if nothing is needed |
-| `target` | `20` | Contributions per UTC day |
+| `target` | `20` | Bot commits per UTC day (on top of yours) |
 | `per_run` | `3` | Max commits per normal run |
 | `final_run` | `false` | Last backup run: top up to `target` |
 | `keepalive_days` | `50` | Commit if the repo was idle this long |
