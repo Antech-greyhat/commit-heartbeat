@@ -20,7 +20,7 @@ Each time it runs, it:
 1. Click **Use this template → Create a new repository** (public). Don't fork: commits in forks do not count toward your contribution graph.
 2. In the new repo, move `examples/streak.yml` to `.github/workflows/streak.yml` and replace `OWNER` with the account that hosts this tool.
 3. Copy `examples/messages.txt` to `.heartbeat/messages.txt` and edit the messages.
-4. Delete the copied `.github/workflows/heartbeat.yml` from your new repo if you call the upstream `@v2` version (optional).
+4. Delete the copied `.github/workflows/heartbeat.yml` from your new repo if you call the upstream `@v3` version (optional).
 5. Add repository secrets (**Settings → Secrets and variables → Actions**):
    - `GIT_USER_NAME`: your name
    - `GIT_USER_EMAIL`: your GitHub no-reply email (`ID+username@users.noreply.github.com`)
@@ -42,7 +42,7 @@ Each time it runs, it:
 
 ## Limits
 
-- Scheduled runs can be late or skipped. That's why there are several runs a day.
+- Scheduled runs can be late (often 1-3 hours) or skipped. That's why there are several runs a day and the final run sits well before 00:00 UTC. A final run that still starts after midnight UTC acts as a normal run, so it can't dump the whole target into the next day.
 - The contribution graph can take a while to update, so the count may lag.
 - Public repos with no activity for 60 days get their schedules disabled.
 

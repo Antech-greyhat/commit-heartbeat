@@ -1,6 +1,6 @@
 # Reusable "streak guard" workflow.
 # It has NO schedule of its own. Another repo calls it with:
-#   uses: OWNER/commit-heartbeat/.github/workflows/heartbeat.yml@v1
+#   uses: OWNER/commit-heartbeat/.github/workflows/heartbeat.yml@v3
 # No personal details live here: name, email and username come from the caller's secrets.
 name: Commit heartbeat (reusable)
 
@@ -130,6 +130,15 @@ jobs:
           LAST_TS=$(git log -1 --format=%ct)
           DAYS_IDLE=$(( ( $(date -u +%s) - LAST_TS ) / 86400 ))
           echo "Days since last commit in this repo: $DAYS_IDLE"
+
+          # GitHub often starts scheduled runs hours late. A final run that slips past
+          # 00:00 UTC belongs to yesterday: topping up now would dump the whole target
+          # into the new day in one burst, so treat it as a normal run instead.
+          HOUR=$(( 10#$(date -u +%H) ))
+          if [ "$FINAL_RUN" = "true" ] && [ $HOUR -lt 12 ]; then
+            echo "::warning::Final run started late (${HOUR}:xx UTC, after midnight). Acting as a normal run."
+            FINAL_RUN=false
+          fi
 
           # Streak check. Either way the bot goes on to make its own commits;
           # your own commits never count toward the bot's TARGET.
