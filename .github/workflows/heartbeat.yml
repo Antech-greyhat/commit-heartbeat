@@ -110,6 +110,8 @@ jobs:
           GH_USERNAME: ${{ secrets.GH_USERNAME }}
         run: |
           # Reporting stays enabled. Its result never changes the bot's target.
+          # $login, $from, and $to are literal GraphQL variables, not Bash variables.
+          # shellcheck disable=SC2016
           if RESULT=$(gh api graphql \
             -f query='query($login: String!, $from: DateTime!, $to: DateTime!) {
               user(login: $login) {
