@@ -1,40 +1,43 @@
-# Example caller. Copy this to .github/workflows/streak.yml in YOUR repo
-# and replace OWNER with the account that hosts commit-heartbeat.
+# Copy this AND .github/workflows/heartbeat.yml into your repository.
 name: Streak guard
 
 on:
-  # Times are UTC. Pick times that suit your timezone; avoid minute 0.
-  # GitHub often starts scheduled runs 1-3 hours late, so keep the final run
-  # well before 00:00 UTC.
+  # UTC (Kenya = UTC+3). Four normal runs can reach 20; the fifth is a backup.
+  # GitHub can delay or skip schedules, so the daily target is best effort.
   schedule:
-    - cron: "17 4 * * *"
-    - cron: "17 8 * * *"
-    - cron: "23 12 * * *"
-    - cron: "23 16 * * *"
-    - cron: "37 19 * * *"   # final backup, ~4h before 00:00 UTC
-  # Adds the "Run workflow" button.
+    - cron: "17 4 * * *"   # 07:17 Kenya
+    - cron: "17 8 * * *"   # 11:17 Kenya
+    - cron: "23 12 * * *"  # 15:23 Kenya
+    - cron: "23 16 * * *"  # 19:23 Kenya
+    - cron: "37 19 * * *"  # 22:37 Kenya - final backup
   workflow_dispatch:
     inputs:
       force:
-        description: "Make a test commit even if already active today"
+        description: "Make exactly one test commit (dry run previews it)"
         type: boolean
         default: false
+      dry_run:
+        description: "Preview the plan without creating or pushing commits"
+        type: boolean
+        default: true
 
-# Let the bot push commits.
 permissions:
   contents: write
 
 jobs:
   heartbeat:
-    # Pin to a version tag, not @main.
-    uses: OWNER/commit-heartbeat/.github/workflows/heartbeat.yml@v3
+    # A local call runs the matching implementation from this same revision.
+    uses: ./.github/workflows/heartbeat.yml
     permissions:
       contents: write
     with:
       force: ${{ inputs.force == true }}
+      dry_run: ${{ inputs.dry_run == true }}
       target: 20
-      per_run: 3
-      # Must match the last cron line above: that run tops up to target.
+      per_run: 5
       final_run: ${{ github.event.schedule == '37 19 * * *' }}
-    # Passes GIT_USER_NAME, GIT_USER_EMAIL, GH_USERNAME, CONTRIB_TOKEN.
-    secrets: inherit
+    secrets:
+      GIT_USER_NAME: ${{ secrets.GIT_USER_NAME }}
+      GIT_USER_EMAIL: ${{ secrets.GIT_USER_EMAIL }}
+      GH_USERNAME: ${{ secrets.GH_USERNAME }}
+      CONTRIB_TOKEN: ${{ secrets.CONTRIB_TOKEN }}

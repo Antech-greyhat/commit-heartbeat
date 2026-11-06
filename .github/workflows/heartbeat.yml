@@ -1,30 +1,31 @@
-# Reusable "streak guard" workflow.
-# It has NO schedule of its own. Another repo calls it with:
-#   uses: OWNER/commit-heartbeat/.github/workflows/heartbeat.yml@v3
-# No personal details live here: name, email and username come from the caller's secrets.
+# Reusable workflow. Keep a copy in the caller repo or pin a published revision.
 name: Commit heartbeat (reusable)
 
 on:
   workflow_call:
     inputs:
       force:
-        description: "Make 1 test commit even if no commit is needed"
+        description: "Make exactly one test commit, even if the daily target is reached"
+        type: boolean
+        default: false
+      dry_run:
+        description: "Report the plan without creating or pushing commits"
         type: boolean
         default: false
       target:
-        description: "Commits the bot makes of its own per UTC day (your commits are extra)"
+        description: "Bot commits per UTC day, excluding your own (integer 0-100)"
         type: number
         default: 20
       per_run:
-        description: "Max commits per normal run (the final run tops up to target)"
+        description: "Maximum commits per normal run (integer 1-100)"
         type: number
-        default: 3
+        default: 5
       final_run:
-        description: "This is the last backup run of the day: commit whatever is left to reach target"
+        description: "Top up to the target; before noon UTC, use the normal cap instead"
         type: boolean
         default: false
       keepalive_days:
-        description: "Commit anyway if the repo has had no commit for this many days"
+        description: "Make one commit after this many idle days (integer 1-59)"
         type: number
         default: 50
       messages_file:
@@ -39,62 +40,77 @@ on:
       GH_USERNAME:
         required: true
       CONTRIB_TOKEN:
-        # Optional personal access token for reading contribution counts.
         required: false
 
 jobs:
   heartbeat:
     runs-on: ubuntu-latest
-    # Needed so the job can push commits back to the caller repo.
+    timeout-minutes: 15
     permissions:
       contents: write
-    # Never let two runs commit at the same time.
     concurrency:
       group: heartbeat-${{ github.repository }}
       cancel-in-progress: false
+    defaults:
+      run:
+        shell: bash
+    env:
+      FORCE: ${{ inputs.force }}
+      DRY_RUN: ${{ inputs.dry_run }}
+      TARGET: ${{ inputs.target }}
+      PER_RUN: ${{ inputs.per_run }}
+      FINAL_RUN: ${{ inputs.final_run }}
+      KEEPALIVE_DAYS: ${{ inputs.keepalive_days }}
 
     steps:
-      # 1. Get the caller repo with full history (we read git log later).
+      - name: Validate settings
+        run: |
+          for spec in TARGET:0:100 PER_RUN:1:100 KEEPALIVE_DAYS:1:59; do
+            IFS=: read -r key minimum maximum <<< "$spec"
+            value=${!key}
+            # Check syntax and length BEFORE arithmetic (no decimals or overflow).
+            if ! [[ "$value" =~ ^(0|[1-9][0-9]*)$ ]] || [ "${#value}" -gt 3 ]; then
+              echo "::error::$key must be an integer from $minimum to $maximum."
+              exit 1
+            fi
+            if (( value < minimum || value > maximum )); then
+              echo "::error::$key must be an integer from $minimum to $maximum."
+              exit 1
+            fi
+          done
+
       - name: Check out repo
         uses: actions/checkout@v6
         with:
+          ref: ${{ github.event.repository.default_branch }}
           fetch-depth: 0
 
-      # 2. Switch to the default branch, so commits always land where they count.
-      - name: Switch to default branch
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Read default branch
         run: |
-          DEFAULT_BRANCH=$(gh api "repos/${GITHUB_REPOSITORY}" --jq .default_branch)
-          echo "Default branch: $DEFAULT_BRANCH"
-          git checkout "$DEFAULT_BRANCH"
+          DEFAULT_BRANCH=$(git branch --show-current)
+          if [ -z "$DEFAULT_BRANCH" ]; then
+            echo "::error::Expected a checkout of the repository's default branch."
+            exit 1
+          fi
           echo "DEFAULT_BRANCH=$DEFAULT_BRANCH" >> "$GITHUB_ENV"
 
-      # 3. Today's date in UTC (GitHub counts contribution days in UTC).
-      - name: Get today's UTC date
-        run: |
-          TODAY=$(date -u +%Y-%m-%d)
-          echo "Today (UTC): $TODAY"
-          echo "TODAY=$TODAY" >> "$GITHUB_ENV"
-
-      # 4. Count how many commits THIS BOT already made today (from git log).
-      #    Bot commits carry the trailer "Heartbeat-Bot: true".
       - name: Count bot commits today
         run: |
-          BOT_TODAY=$(git log --since="${TODAY}T00:00:00Z" --grep='^Heartbeat-Bot: true' --format=%H | wc -l)
+          TODAY=$(date -u +%Y-%m-%d)
+          BOT_TODAY=$(git log --since-as-filter="${TODAY}T00:00:00Z" \
+            --until="${TODAY}T23:59:59Z" --grep='^Heartbeat-Bot: true$' --format=%H | wc -l)
+          echo "Today (UTC): $TODAY"
           echo "Bot commits today: $BOT_TODAY"
+          echo "TODAY=$TODAY" >> "$GITHUB_ENV"
           echo "BOT_TODAY=$BOT_TODAY" >> "$GITHUB_ENV"
 
-      # 5. Streak check: ask the GitHub GraphQL API for today's contribution count.
-      #    This only tells us whether today's streak is already active; it does NOT
-      #    reduce the bot's own commits. If it fails, API_OK=false and the bot commits anyway.
       - name: Check streak today
         env:
           GH_TOKEN: ${{ secrets.CONTRIB_TOKEN || github.token }}
           GH_USERNAME: ${{ secrets.GH_USERNAME }}
         run: |
-          set +e
-          RESULT=$(gh api graphql \
+          # Reporting stays enabled. Its result never changes the bot's target.
+          if RESULT=$(gh api graphql \
             -f query='query($login: String!, $from: DateTime!, $to: DateTime!) {
               user(login: $login) {
                 contributionsCollection(from: $from, to: $to) {
@@ -105,79 +121,60 @@ jobs:
             -f login="$GH_USERNAME" \
             -f from="${TODAY}T00:00:00Z" \
             -f to="${TODAY}T23:59:59Z" \
-            --jq "[.data.user.contributionsCollection.contributionCalendar.weeks[].contributionDays[] | select(.date == \"$TODAY\") | .contributionCount] | first" 2>&1)
-          STATUS=$?
-          set -e
-          if [ $STATUS -eq 0 ] && [[ "$RESULT" =~ ^[0-9]+$ ]]; then
+            --jq "[.data.user.contributionsCollection.contributionCalendar.weeks[].contributionDays[] | select(.date == \"$TODAY\") | .contributionCount] | first" \
+            2>/dev/null) && [[ "$RESULT" =~ ^[0-9]+$ ]]; then
             echo "Contributions today: $RESULT"
             echo "CONTRIBUTIONS=$RESULT" >> "$GITHUB_ENV"
             echo "API_OK=true" >> "$GITHUB_ENV"
           else
-            echo "::warning::Contribution API check failed (fail-safe will commit). Output: $RESULT"
+            echo "::warning::Contribution lookup failed; the bot will use its Git history as usual."
             echo "API_OK=false" >> "$GITHUB_ENV"
           fi
 
-      # 6. Decide how many commits to make.
       - name: Decide what to do
-        env:
-          FORCE: ${{ inputs.force }}
-          TARGET: ${{ inputs.target }}
-          PER_RUN: ${{ inputs.per_run }}
-          FINAL_RUN: ${{ inputs.final_run }}
-          KEEPALIVE_DAYS: ${{ inputs.keepalive_days }}
         run: |
-          # Days since the last commit of any kind (for the 60-day auto-disable rule).
           LAST_TS=$(git log -1 --format=%ct)
           DAYS_IDLE=$(( ( $(date -u +%s) - LAST_TS ) / 86400 ))
-          echo "Days since last commit in this repo: $DAYS_IDLE"
-
-          # GitHub often starts scheduled runs hours late. A final run that slips past
-          # 00:00 UTC belongs to yesterday: topping up now would dump the whole target
-          # into the new day in one burst, so treat it as a normal run instead.
           HOUR=$(( 10#$(date -u +%H) ))
-          if [ "$FINAL_RUN" = "true" ] && [ $HOUR -lt 12 ]; then
-            echo "::warning::Final run started late (${HOUR}:xx UTC, after midnight). Acting as a normal run."
-            FINAL_RUN=false
+          EFFECTIVE_FINAL=$FINAL_RUN
+          LATE_FINAL=false
+          # An evening backup arriving before noon is treated as a normal run.
+          # This is a guard, not a guarantee about GitHub's scheduling delays.
+          if [ "$FINAL_RUN" = "true" ] && [ "$HOUR" -lt 12 ]; then
+            EFFECTIVE_FINAL=false
+            LATE_FINAL=true
+            echo "::warning::Final run is executing before noon UTC; using the normal cap."
           fi
 
-          # Streak check. Either way the bot goes on to make its own commits;
-          # your own commits never count toward the bot's TARGET.
-          if [ "$API_OK" != "true" ]; then
-            echo "Streak unknown (API check failed), making the bot's commits anyway."
-          elif [ "$CONTRIBUTIONS" -eq 0 ]; then
-            echo "Streak not active yet today: this run's commits will start it."
-          else
-            echo "Streak already active today ($CONTRIBUTIONS contributions), making the bot's own commits on top."
-          fi
-
-          # The bot makes TARGET commits of its own per day, apart from yours.
           NEEDED=$(( TARGET - BOT_TODAY ))
-          if [ $NEEDED -lt 0 ]; then NEEDED=0; fi
-
-          # Normal runs make at most PER_RUN commits; the final run tops up to TARGET.
-          if [ "$FINAL_RUN" = "true" ]; then
-            echo "Final backup run: topping up to $TARGET."
-          elif [ $NEEDED -gt $PER_RUN ]; then
-            NEEDED=$PER_RUN
-          fi
-
-          if [ "$FORCE" = "true" ] && [ $NEEDED -lt 1 ]; then
-            echo "Force is on: making 1 test commit."
+          if [ "$NEEDED" -lt 0 ]; then NEEDED=0; fi
+          if [ "$FORCE" = "true" ]; then
             NEEDED=1
-          elif [ $DAYS_IDLE -ge $KEEPALIVE_DAYS ] && [ $NEEDED -lt 1 ]; then
-            echo "Keepalive: no commit for $DAYS_IDLE days, making 1 commit."
+            REASON="Force requested: exactly one test commit."
+          elif [ "$NEEDED" -eq 0 ] && [ "$DAYS_IDLE" -ge "$KEEPALIVE_DAYS" ]; then
             NEEDED=1
-          elif [ $BOT_TODAY -ge $TARGET ]; then
-            echo "Bot already made $BOT_TODAY commits today, skipping."
+            REASON="Keepalive: repository idle for $DAYS_IDLE days."
+          elif [ "$NEEDED" -eq 0 ]; then
+            REASON="Daily target already reached."
+          elif [ "$EFFECTIVE_FINAL" = "true" ]; then
+            REASON="Final backup: fill the remaining daily target."
           else
-            echo "Will make $NEEDED bot commit(s) this run (bot has $BOT_TODAY/$TARGET today)."
+            if [ "$NEEDED" -gt "$PER_RUN" ]; then NEEDED=$PER_RUN; fi
+            REASON="Normal run: respect the per-run limit."
           fi
+          if [ "$LATE_FINAL" = "true" ]; then
+            REASON="$REASON The final-run top-up was disabled before noon UTC."
+          fi
+          if [ "$DRY_RUN" = "true" ]; then
+            REASON="Dry run: no commits will be created or pushed. $REASON"
+          fi
+          echo "$REASON"
+          echo "Planned commits: $NEEDED (bot has $BOT_TODAY/$TARGET today)"
           echo "NEEDED=$NEEDED" >> "$GITHUB_ENV"
+          echo "REASON=$REASON" >> "$GITHUB_ENV"
 
-      # 7. Make the commits. Each one appends a UTC timestamp to updates.txt
-      #    and picks a random message from the messages file.
       - name: Make commits
-        if: env.NEEDED != '0'
+        if: ${{ !inputs.dry_run && env.NEEDED != '0' }}
         env:
           GIT_USER_NAME: ${{ secrets.GIT_USER_NAME }}
           GIT_USER_EMAIL: ${{ secrets.GIT_USER_EMAIL }}
@@ -185,24 +182,95 @@ jobs:
         run: |
           git config user.name "$GIT_USER_NAME"
           git config user.email "$GIT_USER_EMAIL"
-          for i in $(seq 1 "$NEEDED"); do
-            if [ -s "$MESSAGES_FILE" ]; then
-              MSG=$( (grep -v -e '^\s*$' -e '^#' "$MESSAGES_FILE" || true) | shuf -n 1)
+          COMMITTED=0
+          trap 'echo "COMMITTED=$COMMITTED" >> "$GITHUB_ENV"' EXIT
+          MESSAGES=()
+          if [ -f "$MESSAGES_FILE" ]; then
+            # Accept Windows line endings, blank lines, and indented comments.
+            mapfile -t MESSAGES < <(sed 's/\r$//' "$MESSAGES_FILE" | grep -v -e '^[[:space:]]*$' -e '^[[:space:]]*#' || true)
+          fi
+          for ((i=1; i<=NEEDED; i++)); do
+            STAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+            if [ "${STAMP:0:10}" != "$TODAY" ]; then
+              echo "::warning::UTC day changed; stopping this batch. The next run will recalculate."
+              echo "REASON=UTC day changed while committing; stopped the batch early." >> "$GITHUB_ENV"
+              break
             fi
-            MSG=${MSG:-"chore: heartbeat update"}
-            echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) run ${GITHUB_RUN_ID} #$i" >> updates.txt
-            git add updates.txt
-            git commit -q -m "$MSG" -m "Heartbeat-Bot: true"
-            echo "Committed $i/$NEEDED: $MSG"
+            MSG="chore: record the latest activity timestamp"
+            if [ "${#MESSAGES[@]}" -gt 0 ]; then
+              MSG=$(printf '%s\n' "${MESSAGES[@]}" | shuf -n 1)
+            fi
+            echo "$STAMP run ${GITHUB_RUN_ID} #$i" >> updates.txt
+            git add -- updates.txt
+            GIT_AUTHOR_DATE="$STAMP" GIT_COMMITTER_DATE="$STAMP" git commit -q -m "$MSG" -m "Heartbeat-Bot: true"
+            COMMITTED=$((COMMITTED + 1))
+            echo "Committed $COMMITTED/$NEEDED: $MSG"
           done
 
-      # 8. Push only if we actually committed something.
       - name: Push
-        if: env.NEEDED != '0'
+        if: ${{ !inputs.dry_run && env.COMMITTED != '' && env.COMMITTED != '0' }}
         run: |
-          git push origin "HEAD:${DEFAULT_BRANCH}"
-          echo "Pushed $NEEDED commit(s) to $DEFAULT_BRANCH."
+          for attempt in 1 2 3; do
+            if git push origin "HEAD:${DEFAULT_BRANCH}"; then
+              echo "PUSHED=$COMMITTED" >> "$GITHUB_ENV"
+              echo "Pushed $COMMITTED commit(s) to $DEFAULT_BRANCH."
+              exit 0
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              echo "::error::Push failed after three attempts. Check GitHub availability, token permissions, and branch rules. No force push was used."
+              exit 1
+            fi
+            sleep "$((attempt * 5))"
+            if ! git fetch origin "$DEFAULT_BRANCH"; then
+              echo "::warning::Fetch failed; retrying the push after a possible temporary connection failure."
+              continue
+            fi
+            # No upstream advance can also mean a temporary push failure.
+            # Retry without rebasing; never assume this proves a permissions issue.
+            if git merge-base --is-ancestor FETCH_HEAD HEAD; then
+              echo "::warning::No new upstream commits; retrying the push without a rebase."
+              continue
+            fi
+            if [ "$(date -u +%Y-%m-%d)" != "$TODAY" ]; then
+              echo "::error::UTC day changed before push recovery. Leaving the remote branch untouched."
+              exit 1
+            fi
+            if ! git rebase FETCH_HEAD; then
+              git rebase --abort
+              echo "::error::Upstream changes conflict with this run. Rebase aborted; resolve the conflict before retrying."
+              exit 1
+            fi
+            echo "Upstream changes incorporated; retrying push."
+          done
 
-      # 9. Final summary line for the logs.
       - name: Summary
-        run: echo "Done. API ok=$API_OK, contributions=${CONTRIBUTIONS:-unknown}, bot today=$BOT_TODAY, new commits=$NEEDED"
+        if: ${{ always() }}
+        env:
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          {
+            echo "### Heartbeat run"
+            echo
+            echo "| Item | Value |"
+            echo "| --- | --- |"
+            echo "| Job status | $JOB_STATUS |"
+            echo "| UTC day | ${TODAY:-not checked} |"
+            echo "| Your contributions (at lookup time) | ${CONTRIBUTIONS:-unavailable} |"
+            echo "| Contribution lookup succeeded | ${API_OK:-not checked} |"
+            echo "| Bot commits before this run | ${BOT_TODAY:-unknown} |"
+            echo "| Daily target | $TARGET |"
+            echo "| Planned commits | ${NEEDED:-0} |"
+            echo "| Commits created locally | ${COMMITTED:-0} |"
+            echo "| Commits confirmed pushed | ${PUSHED:-0} |"
+            echo "| Dry run | $DRY_RUN |"
+            echo
+            echo "${REASON:-Run stopped before a decision was available.}"
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$JOB_STATUS" = "success" ] && [ "$DRY_RUN" = "false" ] && \
+             [ "$FORCE" = "false" ] && [ "$FINAL_RUN" = "true" ]; then
+            TOTAL=$(( ${BOT_TODAY:-0} + ${PUSHED:-0} ))
+            if [ "$TOTAL" -lt "$TARGET" ]; then
+              echo "::warning::Final scheduled run ended with $TOTAL/$TARGET bot commits for ${TODAY:-today}."
+              echo "Daily target not reached: $TOTAL/$TARGET. Scheduled runs can be delayed or skipped." >> "$GITHUB_STEP_SUMMARY"
+            fi
+          fi
